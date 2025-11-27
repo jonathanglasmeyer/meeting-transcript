@@ -34,22 +34,27 @@ MEETINGS_DIR = Path.home() / "Meetings"
 DIM = "\033[90m"
 RESET = "\033[0m"
 
-SYSTEM_PROMPT = """Transkript-Glättung. Regeln:
-- Füllwörter weg (ähm, äh, uhm, ahm, also, quasi, halt, sozusagen)
-- Wiederholungen/Satzabbrüche weg
-- Unvollständige → vollständige Sätze
-- Speaker-Labels behalten
+SYSTEM_PROMPT = """Du bist ein Transkript-Glätter. Der User gibt dir ein Meeting-Transkript und du gibst NUR die geglättete Version zurück.
 
-AUSGABE: NUR der bereinigte Text. KEINE Einleitung wie "Hier ist...", KEINE Erklärungen, KEINE Kommentare. Direkt mit dem Text starten."""
+Regeln:
+- NUR echte Füllwörter entfernen: ähm, äh, uhm, ahm, hm, mhm
+- "also/quasi/halt/sozusagen" NUR entfernen wenn sie als Füllwort verwendet werden, NICHT wenn sie Bedeutung tragen
+- Wiederholungen entfernen (z.B. "wir wir" → "wir")
+- Abgebrochene Satzanfänge entfernen (z.B. "Das ist, also das war, ich meine das Projekt...")
+- Speaker-Labels und Zeitstempel BEHALTEN
+- Im Zweifel: Text NICHT ändern
+
+WICHTIG: Gib NUR das geglättete Transkript aus. KEINE Einleitung, KEINE Erklärungen, KEINE Fragen, KEINE Kommentare. Beginne direkt mit dem ersten Speaker-Label."""
 
 
 # =============================================================================
-# Audio Recording (System Audio via scap + Mic via ffmpeg, merged)
+# Audio Recording (System Audio via scap minimal + Mic via ffmpeg, merged)
 # =============================================================================
 
 def record_audio(output_path: Path) -> Path:
     """Record system audio (scap) + microphone (ffmpeg) separately, then merge.
 
+    Uses scap with minimal video (2x2px, 15fps, low quality) to reduce CPU.
     This avoids the ScreenCaptureKit bug where --enable-microphone causes
     mic audio to be played back through speakers (feedback loop).
     """
@@ -59,16 +64,15 @@ def record_audio(output_path: Path) -> Path:
 
     print(f"🎤 Recording... {DIM}[Enter to stop]{RESET}")
 
-    # Start system audio recording (scap WITHOUT --enable-microphone)
+    # Start system audio recording (scap with minimal video: 100x100px, 15fps, low quality)
     scap_proc = subprocess.Popen(
-        ["scap", "--output", str(video_path)],
+        ["scap", "--area", "0:0:100:100", "--fps", "15", "--quality", "low",
+         "--output", str(video_path)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
     )
 
     # Start microphone recording (ffmpeg via AVFoundation)
-    # Using :default for system default input device
-    # stdin=DEVNULL prevents ffmpeg from capturing keyboard input
     mic_proc = subprocess.Popen(
         ["ffmpeg", "-y", "-f", "avfoundation", "-i", ":default",
          "-ar", "16000", "-ac", "1", str(mic_path)],
@@ -99,7 +103,7 @@ def record_audio(output_path: Path) -> Path:
         capture_output=True, check=True
     )
 
-    # Merge system audio + mic into single file (both as mono, mixed together)
+    # Merge system audio + mic into single file
     subprocess.run(
         ["ffmpeg", "-y", "-i", str(system_audio_path), "-i", str(mic_path),
          "-filter_complex", "amix=inputs=2:duration=longest", "-ar", "16000", "-ac", "1", str(output_path)],
