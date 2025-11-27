@@ -1,0 +1,22 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Audio/Video
+*.wav
+*.mov
+*.mp3
+*.mp4
+
+# Generated files
+*.txt
+protokoll_*.md
+fluidaudio_result.json
+
+# Caches
+.cache/
+mlx_models/
