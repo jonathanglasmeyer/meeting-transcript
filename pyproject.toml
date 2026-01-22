@@ -8,11 +8,16 @@ version = "0.1.0"
 description = "Local meeting transcription with MLX-Whisper and Claude protocol generation"
 requires-python = ">=3.10"
 dependencies = [
-    "lightning-whisper-mlx>=0.0.10",
+    "mlx-whisper>=0.4.0",
+    "senko @ git+https://github.com/narcotic-sh/senko.git",
     "claude-agent-sdk>=0.1.0",
     "anyio>=4.0.0",
     "python-dotenv>=1.0.0",
+    "soundfile>=0.13.1",
 ]
 
 [project.scripts]
 meeting = "meeting_transcript.main:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true

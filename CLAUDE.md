@@ -1,44 +1,41 @@
 # meeting-transcript
 
-Local meeting transcription CLI for Apple Silicon. MLX-Whisper + FluidAudio diarization + Claude smoothing.
+Local meeting transcription CLI for Apple Silicon. MLX-Whisper + Senko diarization + Claude smoothing.
 
 ## Usage
 
 ```bash
-meeting                    # Record → Ctrl+C → confirm → process
+meeting                    # Record → Enter → process
 meeting video.mp4          # Process existing audio/video
 meeting ~/Meetings/.../raw.md  # Re-process → processed_1.md
+meeting -r                 # Record only (no transcription)
+meeting -l de audio.mp3    # German transcription
 ```
 
 Output: `~/Meetings/<datetime>/raw.md` + `processed.md`
 
 ## Architecture
 
-- **Recording**: SwiftCapture (ScreenCaptureKit) - System Audio + Mikrofon
-- **Transcription**: lightning-whisper-mlx (distil-large-v3, batch_size=12)
-- **Diarization**: FluidAudio Swift CLI (`/tmp/FluidAudio/.build/release/fluidaudio`)
-- **Smoothing**: Claude Haiku via claude-agent-sdk
+- **Recording**: sox (BlackHole 2ch system audio + default mic, merged to 16kHz mono)
+- **Transcription**: mlx-whisper (distil-large-v3 for EN, large-v3 for others, word-level timestamps)
+- **Diarization**: Senko (CoreML accelerated, ~30x realtime on Apple Silicon)
+- **Smoothing**: Claude Haiku (chunked for large transcripts, up to 15K chars/chunk)
 
-Whisper + FluidAudio run parallel (ThreadPoolExecutor). FluidAudio ~200x realtime; Whisper ~25s for 37min.
+## Setup
 
-## Dependencies
+1. **BlackHole**: `brew install blackhole-2ch`
+2. **Multi-Output Device**: Audio MIDI Setup → Create Multi-Output combining speakers + BlackHole 2ch → Set as system output
+3. **sox + ffmpeg**: `brew install sox ffmpeg ffprobe`
+4. **Project**: `uv sync` (installs all deps including senko)
 
-- SwiftCapture: `brew tap GlennWong/swiftcapture && brew install swiftcapture`
-- FluidAudio must be built: `cd /tmp/FluidAudio && swift build -c release`
-- Requires ffmpeg/ffprobe for audio conversion
-- Rust required for tiktoken build (lightning-whisper-mlx dep)
-- Screen Recording + Microphone permissions required
-
-## Dev Commands
+## Dev
 
 ```bash
-uv sync                    # Install deps
-uv run meeting <file>      # Run locally
+uv run meeting <file>      # Run from repo
 uv tool install .          # Install globally as `meeting`
 ```
 
-## Key Files
+## Config
 
-- `main.py:252`: Claude prompt for smoothing
-- `main.py:149`: FluidAudio binary path
-- `main.py:33`: Output directory (~/Meetings)
+- `WHISPER_MODEL`: Override model (default: distil-large-v3 for EN, large-v3 for others)
+- `.env`: Not required (Senko caches models locally)

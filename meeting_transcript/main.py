@@ -5,28 +5,13 @@ import argparse
 import os
 import sys
 import re
-import signal
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
-
 from dotenv import load_dotenv
 load_dotenv()
 
 import anyio
-
-# Lazy imports for heavy dependencies
-LightningWhisperMLX = None
-
-
-def lazy_import_whisper():
-    global LightningWhisperMLX
-    if LightningWhisperMLX is None:
-        from lightning_whisper_mlx import LightningWhisperMLX as LWMLX
-        LightningWhisperMLX = LWMLX
-    return LightningWhisperMLX
-
 
 MEETINGS_DIR = Path.home() / "Meetings"
 
@@ -41,112 +26,152 @@ Regeln:
 - "also/quasi/halt/sozusagen" NUR entfernen wenn sie als Füllwort verwendet werden, NICHT wenn sie Bedeutung tragen
 - Wiederholungen entfernen (z.B. "wir wir" → "wir")
 - Abgebrochene Satzanfänge entfernen (z.B. "Das ist, also das war, ich meine das Projekt...")
-- Speaker-Labels und Zeitstempel BEHALTEN
+- ALLE Zeitstempel BEHALTEN (auch [0.0s] am Anfang!)
 - Im Zweifel: Text NICHT ändern
 
-WICHTIG: Gib NUR das geglättete Transkript aus. KEINE Einleitung, KEINE Erklärungen, KEINE Fragen, KEINE Kommentare. Beginne direkt mit dem ersten Speaker-Label."""
+SPEAKER-KORREKTUR:
+- Wenn innerhalb eines Blocks OFFENSICHTLICH mehrere Sprecher sind (z.B. Frage + Antwort), dann aufteilen
+- Verwende konsistente Speaker-Labels (SPEAKER_1, SPEAKER_2, etc.)
+- UNKNOWN durch passendes Label ersetzen wenn aus Kontext klar
+
+WICHTIG: Gib NUR das geglättete Transkript aus. KEINE Einleitung, KEINE Erklärungen, KEINE Fragen, KEINE Kommentare, KEINE Markdown-Codeblöcke (```). Beginne direkt mit dem ersten Speaker-Label."""
 
 
 # =============================================================================
-# Audio Recording (System Audio via scap minimal + Mic via ffmpeg, merged)
+# Audio Recording (System Audio via BlackHole + Mic via ffmpeg, merged)
 # =============================================================================
 
-def record_audio(output_path: Path) -> Path:
-    """Record system audio (scap) + microphone (ffmpeg) separately, then merge.
+def record_audio(output_path: Path, downsample: bool = True) -> Path:
+    """Record system audio (BlackHole) + microphone separately, then merge.
 
-    Uses scap with minimal video (2x2px, 15fps, low quality) to reduce CPU.
-    This avoids the ScreenCaptureKit bug where --enable-microphone causes
-    mic audio to be played back through speakers (feedback loop).
+    Requires Multi-Output Device setup in Audio MIDI Setup:
+    - Create Multi-Output combining speakers + BlackHole 2ch
+    - Set as system output
+    This routes audio to speakers (you hear) AND BlackHole (for recording).
+
+    Args:
+        downsample: If True, convert to 16kHz mono for Whisper. If False, keep native quality.
     """
-    video_path = output_path.parent / "recording.mov"
     mic_path = output_path.parent / "mic.wav"
     system_audio_path = output_path.parent / "system.wav"
 
     print(f"🎤 Recording... {DIM}[Enter to stop]{RESET}")
 
-    # Start system audio recording (scap with minimal video: 100x100px, 15fps, low quality)
-    scap_proc = subprocess.Popen(
-        ["scap", "--area", "0:0:100:100", "--fps", "15", "--quality", "low",
-         "--output", str(video_path)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
+    # Record system audio from BlackHole via sox (ffmpeg has crackling issues)
+    # Use DEVNULL for stdout/stderr to prevent pipe buffer blocking
+    system_proc = subprocess.Popen(
+        ["sox", "-q", "-t", "coreaudio", "BlackHole 2ch", str(system_audio_path)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
-    # Start microphone recording (ffmpeg via AVFoundation)
+    # Record mic via sox
     mic_proc = subprocess.Popen(
-        ["ffmpeg", "-y", "-f", "avfoundation", "-i", ":default",
-         "-ar", "16000", "-ac", "1", str(mic_path)],
+        ["sox", "-q", "-t", "coreaudio", "default", str(mic_path)],
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
+
+    import time
+    recording_start = time.time()
 
     try:
         input()
     except (KeyboardInterrupt, EOFError):
         pass
     finally:
-        # Stop both recordings
-        scap_proc.send_signal(signal.SIGINT)
-        mic_proc.send_signal(signal.SIGINT)
-        scap_proc.wait(timeout=5)
-        mic_proc.wait(timeout=5)
+        recording_duration = time.time() - recording_start
+        # Stop recordings - sox needs SIGINT to write WAV headers properly
+        import signal
+        for proc in [system_proc, mic_proc]:
+            if proc.poll() is None:  # Still running
+                proc.send_signal(signal.SIGINT)
+        for proc in [system_proc, mic_proc]:
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                print(f"⚠️  sox didn't stop cleanly, killing...")
+                proc.kill()
+                proc.wait()
 
-    if not video_path.exists():
-        raise RuntimeError("System audio recording failed")
+    if not system_audio_path.exists():
+        raise RuntimeError("System audio recording failed - is BlackHole set up?")
     if not mic_path.exists():
         raise RuntimeError("Microphone recording failed")
 
-    # Extract system audio from video
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", str(video_path), "-vn", "-ar", "16000", "-ac", "1", str(system_audio_path)],
-        capture_output=True, check=True
-    )
+    # Validate WAV files are not corrupt
+    for wav_file in [system_audio_path, mic_path]:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(wav_file)],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            raise RuntimeError(f"Recording failed - {wav_file.name} is corrupt. sox may not have stopped cleanly.")
 
-    # Merge system audio + mic into single file
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", str(system_audio_path), "-i", str(mic_path),
-         "-filter_complex", "amix=inputs=2:duration=longest", "-ar", "16000", "-ac", "1", str(output_path)],
-        capture_output=True, check=True
-    )
+        # Check duration is reasonable (within 50% of expected)
+        wav_duration = float(result.stdout.strip())
+        if wav_duration < recording_duration * 0.5 or wav_duration > recording_duration * 1.5:
+            raise RuntimeError(
+                f"Recording failed - {wav_file.name} duration ({wav_duration:.1f}s) doesn't match "
+                f"recording time ({recording_duration:.1f}s). WAV header may be corrupt."
+            )
 
-    # Cleanup temp files
-    video_path.unlink()
-    mic_path.unlink()
-    system_audio_path.unlink()
+    # Merge system audio + mic
+    if downsample:
+        # Convert to 16kHz mono for Whisper
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(system_audio_path), "-i", str(mic_path),
+             "-filter_complex", "[0:a]aresample=16000[a0];[1:a]aresample=16000[a1];[a0][a1]amix=inputs=2:duration=longest:normalize=0",
+             "-ar", "16000", "-ac", "1", str(output_path)],
+            capture_output=True, check=True
+        )
+    else:
+        # Keep native quality, mix to mono
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(system_audio_path), "-i", str(mic_path),
+             "-filter_complex", "amix=inputs=2:duration=longest:normalize=0",
+             str(output_path)],
+            capture_output=True, check=True
+        )
+
+    # Keep temp files for debugging (TODO: remove later)
+    # mic_path.unlink()
+    # system_audio_path.unlink()
 
     return output_path
 
 
 # =============================================================================
-# Transcription (Lightning Whisper MLX)
+# Transcription (mlx-whisper)
 # =============================================================================
 
-_whisper_instance = None
-_whisper_model = None
+# Model name mapping for mlx-whisper (uses HuggingFace model IDs)
+MLX_WHISPER_MODELS = {
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+    "distil-large-v3": "mlx-community/distil-whisper-large-v3",
+    "large-v2": "mlx-community/whisper-large-v2-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "small": "mlx-community/whisper-small-mlx",
+    "base": "mlx-community/whisper-base-mlx",
+    "tiny": "mlx-community/whisper-tiny-mlx",
+}
 
 
 def transcribe_audio(audio_path: Path, model: str = "distil-large-v3", batch_size: int = 12, language: str = "en") -> dict:
-    """Transcribe audio using Lightning Whisper MLX."""
-    global _whisper_instance, _whisper_model
+    """Transcribe audio using mlx-whisper with word-level timestamps."""
+    import mlx_whisper
 
-    WhisperClass = lazy_import_whisper()
-
-    # lightning-whisper-mlx uses hardcoded relative paths (./mlx_models/)
-    # so we need to chdir to a fixed location for model caching
-    model_cache_dir = Path(__file__).parent / "mlx_models"
-    model_cache_dir.mkdir(exist_ok=True)
-    original_cwd = os.getcwd()
-    os.chdir(Path(__file__).parent)
-
-    try:
-        if _whisper_instance is None or _whisper_model != model:
-            _whisper_instance = WhisperClass(model=model, batch_size=batch_size)
-            _whisper_model = model
-
-        return _whisper_instance.transcribe(audio_path=str(audio_path), language=language)
-    finally:
-        os.chdir(original_cwd)
+    model_id = MLX_WHISPER_MODELS.get(model, model)
+    return mlx_whisper.transcribe(
+        str(audio_path),
+        path_or_hf_repo=model_id,
+        language=language,
+        word_timestamps=True,
+    )
 
 
 def get_audio_duration(audio_path: Path) -> float:
@@ -176,42 +201,32 @@ def convert_to_wav(audio_path: Path) -> Path:
 
 
 # =============================================================================
-# Diarization (FluidAudio)
+# Diarization (Senko - CoreML accelerated)
 # =============================================================================
 
-FLUIDAUDIO_PATH = "/tmp/FluidAudio/.build/release/fluidaudio"
+_senko_diarizer = None
+
+
+def get_senko_diarizer():
+    """Lazy-load Senko diarizer."""
+    global _senko_diarizer
+    if _senko_diarizer is None:
+        import senko
+        _senko_diarizer = senko.Diarizer(device='auto', warmup=True, quiet=True)
+    return _senko_diarizer
 
 
 def diarize_audio(audio_path: Path) -> list[dict]:
-    """Run speaker diarization using FluidAudio (Swift/CoreML)."""
-    import json
-    import tempfile
-
+    """Run speaker diarization using Senko (CoreML accelerated)."""
     wav_path = convert_to_wav(audio_path)
+    diarizer = get_senko_diarizer()
 
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-        output_path = f.name
+    result = diarizer.diarize(str(wav_path))
 
-    try:
-        subprocess.run(
-            [FLUIDAUDIO_PATH, "process", str(wav_path), "--output", output_path],
-            capture_output=True, text=True, check=True
-        )
-
-        with open(output_path) as f:
-            data = json.load(f)
-
-        segments = []
-        for seg in data.get("segments", []):
-            segments.append({
-                "start": seg.get("startTimeSeconds", 0),
-                "end": seg.get("endTimeSeconds", 0),
-                "speaker": f"SPEAKER_{seg.get('speakerId', '0')}"
-            })
-        return segments
-
-    finally:
-        Path(output_path).unlink(missing_ok=True)
+    return [
+        {"start": seg["start"], "end": seg["end"], "speaker": seg["speaker"]}
+        for seg in result.get("merged_segments", [])
+    ]
 
 
 # =============================================================================
@@ -219,21 +234,8 @@ def diarize_audio(audio_path: Path) -> list[dict]:
 # =============================================================================
 
 def merge_transcript_with_speakers(transcript: dict, diarization: list[dict]) -> str:
-    """Merge whisper transcript with speaker labels."""
-    raw_segments = transcript.get("segments", [])
-    HOP_LENGTH = 160
-    SAMPLE_RATE = 16000
-
-    def normalize_segment(seg):
-        if isinstance(seg, list):
-            return {
-                "start": seg[0] * HOP_LENGTH / SAMPLE_RATE,
-                "end": seg[1] * HOP_LENGTH / SAMPLE_RATE,
-                "text": seg[2] if len(seg) > 2 else ""
-            }
-        return seg
-
-    segments = [normalize_segment(s) for s in raw_segments]
+    """Merge whisper transcript with speaker labels using word-level timestamps."""
+    segments = transcript.get("segments", [])
 
     if not diarization:
         return "\n".join(
@@ -253,8 +255,15 @@ def merge_transcript_with_speakers(transcript: dict, diarization: list[dict]) ->
     current_start = 0
 
     for segment in segments:
-        seg_mid = (segment["start"] + segment["end"]) / 2
-        speaker = get_speaker_at(seg_mid)
+        # Use word-level timestamps for better speaker assignment
+        words = segment.get("words", [])
+        if words:
+            # Assign speaker based on first word timestamp
+            seg_time = words[0].get("start", segment["start"])
+        else:
+            seg_time = (segment["start"] + segment["end"]) / 2
+
+        speaker = get_speaker_at(seg_time)
 
         if speaker != current_speaker:
             if current_text:
@@ -275,8 +284,33 @@ def merge_transcript_with_speakers(transcript: dict, diarization: list[dict]) ->
 # Claude Protocol Generation
 # =============================================================================
 
-async def generate_protocol(transcript: str) -> str:
-    """Generate smoothed transcript using Claude."""
+MAX_CHUNK_SIZE = 15000  # ~4K tokens, safe for Haiku output limit
+
+
+def split_transcript(transcript: str, max_size: int = MAX_CHUNK_SIZE) -> list[str]:
+    """Split transcript into chunks at speaker boundaries."""
+    lines = transcript.split("\n")
+    chunks = []
+    current_chunk = []
+    current_size = 0
+
+    for line in lines:
+        line_size = len(line) + 1  # +1 for newline
+        if current_size + line_size > max_size and current_chunk:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = []
+            current_size = 0
+        current_chunk.append(line)
+        current_size += line_size
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+
+    return chunks
+
+
+async def generate_protocol_chunk(chunk: str, chunk_idx: int) -> tuple[int, str]:
+    """Process a single chunk and return (index, result)."""
     from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, TextBlock
 
     options = ClaudeAgentOptions(
@@ -285,14 +319,36 @@ async def generate_protocol(transcript: str) -> str:
         model="haiku"
     )
 
-    protocol_parts = []
-    async for message in query(prompt=transcript, options=options):
+    parts = []
+    async for message in query(prompt=chunk, options=options):
         if isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, TextBlock):
-                    protocol_parts.append(block.text)
+                    parts.append(block.text)
 
-    return "\n".join(protocol_parts)
+    return (chunk_idx, "\n".join(parts))
+
+
+async def generate_protocol(transcript: str) -> str:
+    """Generate smoothed transcript using Claude, with chunking for large transcripts."""
+    import asyncio
+
+    # Small transcripts: process directly
+    if len(transcript) <= MAX_CHUNK_SIZE:
+        _, result = await generate_protocol_chunk(transcript, 0)
+        return result
+
+    # Large transcripts: split and process in parallel
+    chunks = split_transcript(transcript)
+    print(f"  📦 Split into {len(chunks)} chunks for parallel processing")
+
+    # Process all chunks in parallel
+    tasks = [generate_protocol_chunk(chunk, i) for i, chunk in enumerate(chunks)]
+    results = await asyncio.gather(*tasks)
+
+    # Sort by index and join
+    results.sort(key=lambda x: x[0])
+    return "\n".join(result for _, result in results)
 
 
 # =============================================================================
@@ -321,35 +377,53 @@ def get_next_processed_path(meeting_dir: Path) -> Path:
         i += 1
 
 
+MIN_AUDIO_DURATION = 3.0  # seconds - minimum for meaningful transcription
+
+
 async def process_audio(audio_path: Path, meeting_dir: Path, language: str = "en") -> Path:
     """Full pipeline: transcribe, diarize, generate protocol."""
     import time
+    import shutil
     pipeline_start = time.time()
+
+    duration = get_audio_duration(audio_path)
+    if duration < MIN_AUDIO_DURATION:
+        print(f"⏭️  Audio too short ({duration:.1f}s < {MIN_AUDIO_DURATION:.0f}s), skipping")
+        shutil.rmtree(meeting_dir)
+        return None
 
     # distil-large-v3 is English-only, use large-v3 for other languages
     default_model = "distil-large-v3" if language == "en" else "large-v3"
     model = os.environ.get("WHISPER_MODEL", default_model)
-    duration = get_audio_duration(audio_path)
 
     print(f"⏳ Processing {duration/60:.1f}min audio {DIM}({language}, {model}){RESET}")
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        future_transcript = executor.submit(transcribe_audio, audio_path, model, 12, language)
-        future_diarization = executor.submit(diarize_audio, audio_path)
-        transcript = future_transcript.result()
-        diarization = future_diarization.result()
+    # Run sequentially - Senko uses numba which conflicts with ThreadPoolExecutor
+    t1 = time.time()
+    print(f"  📝 Transcribing...", end="", flush=True)
+    transcript = transcribe_audio(audio_path, model, 12, language)
+    print(f" {DIM}({time.time()-t1:.1f}s){RESET}")
+
+    t2 = time.time()
+    print(f"  👥 Diarizing...", end="", flush=True)
+    diarization = diarize_audio(audio_path)
+    print(f" {DIM}({time.time()-t2:.1f}s){RESET}")
 
     # Merge and save raw transcript
     merged = merge_transcript_with_speakers(transcript, diarization)
     raw_path = meeting_dir / "raw.md"
     with open(raw_path, "w") as f:
         f.write(merged)
+    print(f"  💾 Saved {raw_path.name} {DIM}({len(merged)//1024}KB){RESET}")
 
-    # Generate smoothed version
+    # Generate smoothed version (auto-chunks large transcripts)
+    t3 = time.time()
+    print(f"  ✨ Smoothing with Claude...", end="", flush=True)
     processed = await generate_protocol(merged)
     processed_path = get_next_processed_path(meeting_dir)
     with open(processed_path, "w") as f:
         f.write(processed)
+    print(f" {DIM}({time.time()-t3:.1f}s){RESET}")
 
     total_time = time.time() - pipeline_start
     print(f"✅ {processed_path} {DIM}({total_time:.1f}s){RESET}")
@@ -379,6 +453,8 @@ def parse_args():
     parser.add_argument("file", nargs="?", help="Audio/video file or raw.md to process")
     parser.add_argument("-l", "--lang", "--language", dest="language", default="en",
                        choices=["en", "de"], help="Transcription language (default: en)")
+    parser.add_argument("-r", "--record-only", action="store_true",
+                       help="Record audio only, skip transcription")
     return parser.parse_args()
 
 
@@ -409,8 +485,13 @@ async def async_main():
         meeting_dir = create_meeting_dir()
         audio_path = meeting_dir / "recording.wav"
 
-        record_audio(audio_path)
-        await process_audio(audio_path, meeting_dir, args.language)
+        if args.record_only:
+            record_audio(audio_path, downsample=False)
+            print(f"✅ {audio_path}")
+            subprocess.run(["open", str(audio_path)])
+        else:
+            record_audio(audio_path, downsample=True)
+            await process_audio(audio_path, meeting_dir, args.language)
 
 
 def main():
