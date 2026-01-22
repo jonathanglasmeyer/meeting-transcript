@@ -11,15 +11,18 @@ Local meeting transcription CLI for Apple Silicon. Records system audio + mic, t
 # Record a meeting
 meeting
 
+# Record with German transcription
+meeting -l de
+
 # Process existing audio
 meeting video.mp4
 meeting audio.wav
 
+# Process with German transcription
+meeting -l de audio.mp3
+
 # Re-smooth existing transcript
 meeting ~/Meetings/2026-01-22_110000/raw.md
-
-# German transcription
-meeting -l de audio.mp3
 ```
 
 ## Install
