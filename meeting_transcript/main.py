@@ -38,108 +38,249 @@ WICHTIG: Gib NUR das geglättete Transkript aus. KEINE Einleitung, KEINE Erklär
 
 
 # =============================================================================
-# Audio Recording (System Audio via BlackHole + Mic via ffmpeg, merged)
+# Audio Recording - ROBUST VERSION
+# =============================================================================
+# Strategy for bulletproof recording:
+# 1. Raw PCM format (no header = no corruption possible)
+# 2. ffmpeg with graceful 'q' shutdown (more reliable than sox SIGINT)
+# 3. Redundant recording: ffmpeg as primary, sox as backup
+# 4. Recovery: if primary fails, use backup; raw PCM always recoverable
 # =============================================================================
 
+# Recording constants
+SAMPLE_RATE = 48000
+CHANNELS_MONO = 1
+CHANNELS_STEREO = 2
+BITS = 32  # s32le format
+
+
+def _get_raw_audio_duration(raw_path: Path, sample_rate: int, channels: int, bits: int = 32) -> float:
+    """Calculate duration of raw PCM file from file size."""
+    if not raw_path.exists():
+        return 0.0
+    bytes_per_sample = bits // 8
+    bytes_per_second = sample_rate * channels * bytes_per_sample
+    return raw_path.stat().st_size / bytes_per_second
+
+
+def _convert_raw_to_wav(raw_path: Path, wav_path: Path, sample_rate: int, channels: int) -> bool:
+    """Convert raw PCM to WAV. Returns True on success."""
+    if not raw_path.exists() or raw_path.stat().st_size == 0:
+        return False
+
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-f", "s32le", "-ar", str(sample_rate), "-ac", str(channels),
+         "-i", str(raw_path), "-c:a", "pcm_s32le", str(wav_path)],
+        capture_output=True
+    )
+    return result.returncode == 0 and wav_path.exists()
+
+
+def _stop_ffmpeg_gracefully(proc: subprocess.Popen, name: str, timeout: int = 5) -> bool:
+    """Stop ffmpeg by sending 'q' to stdin. Returns True if stopped cleanly."""
+    if proc.poll() is not None:
+        return True  # Already stopped
+
+    try:
+        proc.stdin.write(b"q")
+        proc.stdin.flush()
+        proc.wait(timeout=timeout)
+        return True
+    except Exception:
+        pass
+
+    # Fallback: SIGTERM then SIGKILL
+    try:
+        proc.terminate()
+        proc.wait(timeout=3)
+        return True
+    except subprocess.TimeoutExpired:
+        print(f"  ⚠️  {name} didn't stop, killing...")
+        proc.kill()
+        proc.wait()
+        return False
+
+
+def _stop_sox_gracefully(proc: subprocess.Popen, name: str, timeout: int = 5) -> bool:
+    """Stop sox with SIGINT. Returns True if stopped cleanly."""
+    import signal
+
+    if proc.poll() is not None:
+        return True
+
+    try:
+        proc.send_signal(signal.SIGINT)
+        proc.wait(timeout=timeout)
+        return True
+    except subprocess.TimeoutExpired:
+        print(f"  ⚠️  {name} didn't stop, killing...")
+        proc.kill()
+        proc.wait()
+        return False
+
+
 def record_audio(output_path: Path, downsample: bool = True) -> Path:
-    """Record system audio (BlackHole) + microphone separately, then merge.
+    """Record system audio (BlackHole) + microphone with redundant, crash-proof recording.
+
+    ROBUST RECORDING STRATEGY:
+    - Primary: ffmpeg recording to raw PCM (no header = no corruption)
+    - Backup: sox recording to WAV (traditional, but can corrupt)
+    - Graceful shutdown: ffmpeg via 'q' stdin, sox via SIGINT
+    - Recovery: raw PCM is always recoverable, even after kill
 
     Requires Multi-Output Device setup in Audio MIDI Setup:
     - Create Multi-Output combining speakers + BlackHole 2ch
     - Set as system output
-    This routes audio to speakers (you hear) AND BlackHole (for recording).
-
-    Args:
-        downsample: If True, convert to 16kHz mono for Whisper. If False, keep native quality.
     """
-    mic_path = output_path.parent / "mic.wav"
-    system_audio_path = output_path.parent / "system.wav"
+    import time
+    import signal
+
+    recording_dir = output_path.parent
+
+    # Primary recordings (raw PCM - crash-proof)
+    mic_raw = recording_dir / "mic.raw"
+    system_raw = recording_dir / "system.raw"
+
+    # Backup recordings (WAV via sox)
+    mic_wav_backup = recording_dir / "mic_backup.wav"
+    system_wav_backup = recording_dir / "system_backup.wav"
+
+    # Final WAV files
+    mic_wav = recording_dir / "mic.wav"
+    system_wav = recording_dir / "system.wav"
 
     print(f"🎤 Recording... {DIM}[Enter to stop]{RESET}")
 
-    # Record system audio from BlackHole via sox (ffmpeg has crackling issues)
-    # Use DEVNULL for stdout/stderr to prevent pipe buffer blocking
-    system_proc = subprocess.Popen(
-        ["sox", "-q", "-t", "coreaudio", "BlackHole 2ch", str(system_audio_path)],
+    # === PRIMARY: ffmpeg to raw PCM (crash-proof, no headers) ===
+    # Mic: mono
+    ffmpeg_mic = subprocess.Popen(
+        ["ffmpeg", "-y", "-f", "avfoundation", "-i", ":default",
+         "-f", "s32le", "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS_MONO),
+         str(mic_raw)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # System audio (BlackHole): stereo
+    ffmpeg_system = subprocess.Popen(
+        ["ffmpeg", "-y", "-f", "avfoundation", "-i", ":BlackHole 2ch",
+         "-f", "s32le", "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS_STEREO),
+         str(system_raw)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # === BACKUP: sox to WAV (traditional, may corrupt on kill) ===
+    sox_mic = subprocess.Popen(
+        ["sox", "-q", "-t", "coreaudio", "default", str(mic_wav_backup)],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
 
-    # Record mic via sox
-    mic_proc = subprocess.Popen(
-        ["sox", "-q", "-t", "coreaudio", "default", str(mic_path)],
+    sox_system = subprocess.Popen(
+        ["sox", "-q", "-t", "coreaudio", "BlackHole 2ch", str(system_wav_backup)],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
 
-    import time
     recording_start = time.time()
 
+    # Wait for user to stop recording
     try:
         input()
     except (KeyboardInterrupt, EOFError):
         pass
     finally:
         recording_duration = time.time() - recording_start
-        # Stop recordings - sox needs SIGINT to write WAV headers properly
-        import signal
-        for proc in [system_proc, mic_proc]:
-            if proc.poll() is None:  # Still running
-                proc.send_signal(signal.SIGINT)
-        for proc in [system_proc, mic_proc]:
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                print(f"⚠️  sox didn't stop cleanly, killing...")
-                proc.kill()
-                proc.wait()
+        print(f"  ⏹️  Stopping recording ({recording_duration:.0f}s)...")
 
-    if not system_audio_path.exists():
-        raise RuntimeError("System audio recording failed - is BlackHole set up?")
-    if not mic_path.exists():
-        raise RuntimeError("Microphone recording failed")
+        # Stop all processes gracefully
+        ffmpeg_mic_ok = _stop_ffmpeg_gracefully(ffmpeg_mic, "ffmpeg-mic")
+        ffmpeg_system_ok = _stop_ffmpeg_gracefully(ffmpeg_system, "ffmpeg-system")
+        sox_mic_ok = _stop_sox_gracefully(sox_mic, "sox-mic")
+        sox_system_ok = _stop_sox_gracefully(sox_system, "sox-system")
 
-    # Validate WAV files are not corrupt
-    for wav_file in [system_audio_path, mic_path]:
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(wav_file)],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            raise RuntimeError(f"Recording failed - {wav_file.name} is corrupt. sox may not have stopped cleanly.")
+    # === RECOVERY: Choose best available source for each track ===
 
-        # Check duration is reasonable (within 50% of expected)
-        wav_duration = float(result.stdout.strip())
-        if wav_duration < recording_duration * 0.5 or wav_duration > recording_duration * 1.5:
-            raise RuntimeError(
-                f"Recording failed - {wav_file.name} duration ({wav_duration:.1f}s) doesn't match "
-                f"recording time ({recording_duration:.1f}s). WAV header may be corrupt."
+    def recover_audio(raw_path: Path, backup_path: Path, final_path: Path,
+                      sample_rate: int, channels: int, name: str) -> bool:
+        """Try to recover audio from primary (raw) or backup (wav)."""
+
+        # Try primary (raw PCM) first - always recoverable
+        raw_duration = _get_raw_audio_duration(raw_path, sample_rate, channels)
+        if raw_duration > 1.0:  # At least 1 second
+            if _convert_raw_to_wav(raw_path, final_path, sample_rate, channels):
+                print(f"  ✓ {name}: recovered from raw ({raw_duration:.0f}s)")
+                return True
+
+        # Try backup (sox WAV)
+        if backup_path.exists() and backup_path.stat().st_size > 1000:
+            # Validate WAV is not corrupt
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(backup_path)],
+                capture_output=True, text=True
             )
+            if result.returncode == 0 and result.stdout.strip():
+                backup_duration = float(result.stdout.strip())
+                # Check if duration is reasonable (within 50% of expected)
+                if backup_duration > recording_duration * 0.5:
+                    # Copy backup to final location
+                    subprocess.run(["cp", str(backup_path), str(final_path)], check=True)
+                    print(f"  ✓ {name}: using backup ({backup_duration:.0f}s)")
+                    return True
 
-    # Merge system audio + mic
+        print(f"  ✗ {name}: FAILED - no valid recording")
+        return False
+
+    # Recover mic and system audio
+    mic_ok = recover_audio(mic_raw, mic_wav_backup, mic_wav, SAMPLE_RATE, CHANNELS_MONO, "mic")
+    system_ok = recover_audio(system_raw, system_wav_backup, system_wav, SAMPLE_RATE, CHANNELS_STEREO, "system")
+
+    # At minimum, we need system audio (others' voices in the call)
+    if not system_ok:
+        raise RuntimeError("Recording failed - no system audio recovered. Is BlackHole set up?")
+
+    if not mic_ok:
+        print(f"  ⚠️  Mic recording failed - continuing with system audio only")
+        # Create silent mic track to allow merge
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=mono",
+             "-t", str(recording_duration), "-c:a", "pcm_s32le", str(mic_wav)],
+            capture_output=True, check=True
+        )
+
+    # === MERGE: Combine mic + system audio ===
     if downsample:
         # Convert to 16kHz mono for Whisper
         subprocess.run(
-            ["ffmpeg", "-y", "-i", str(system_audio_path), "-i", str(mic_path),
+            ["ffmpeg", "-y", "-i", str(system_wav), "-i", str(mic_wav),
              "-filter_complex", "[0:a]aresample=16000[a0];[1:a]aresample=16000[a1];[a0][a1]amix=inputs=2:duration=longest:normalize=0",
              "-ar", "16000", "-ac", "1", str(output_path)],
             capture_output=True, check=True
         )
     else:
-        # Keep native quality, mix to mono
+        # Keep native quality
         subprocess.run(
-            ["ffmpeg", "-y", "-i", str(system_audio_path), "-i", str(mic_path),
+            ["ffmpeg", "-y", "-i", str(system_wav), "-i", str(mic_wav),
              "-filter_complex", "amix=inputs=2:duration=longest:normalize=0",
              str(output_path)],
             capture_output=True, check=True
         )
 
-    # Keep temp files for debugging (TODO: remove later)
-    # mic_path.unlink()
-    # system_audio_path.unlink()
+    # Cleanup raw files (keep wav for debugging)
+    for raw_file in [mic_raw, system_raw]:
+        if raw_file.exists():
+            raw_file.unlink()
+
+    # Cleanup backup files
+    for backup_file in [mic_wav_backup, system_wav_backup]:
+        if backup_file.exists():
+            backup_file.unlink()
 
     return output_path
 

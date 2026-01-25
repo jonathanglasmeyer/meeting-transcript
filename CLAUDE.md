@@ -16,7 +16,10 @@ Output: `~/Meetings/<datetime>/raw.md` + `processed.md`
 
 ## Architecture
 
-- **Recording**: sox (BlackHole 2ch system audio + default mic, merged to 16kHz mono)
+- **Recording**: Crash-proof dual-redundant (BlackHole 2ch + default mic → merged 16kHz mono)
+  - Primary: ffmpeg → raw PCM (headerless = survives kill -9)
+  - Backup: sox → WAV
+  - Auto-recovery picks best source per track
 - **Transcription**: mlx-whisper (distil-large-v3 for EN, large-v3 for others, word-level timestamps)
 - **Diarization**: Senko (CoreML accelerated, ~30x realtime on Apple Silicon)
 - **Smoothing**: Claude Haiku (chunked for large transcripts, up to 15K chars/chunk)
