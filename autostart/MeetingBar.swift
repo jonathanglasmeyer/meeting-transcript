@@ -168,7 +168,7 @@ struct Config {
     var meetingBundleIDs: [String]
     var meetingCommand: String
     var recordOnly: Bool
-    var language: String?
+    var whisperModel: String?
     var cooldown: TimeInterval
     var requireMeetingApp: Bool
     var ignoreDeviceSubstrings: [String]
@@ -180,7 +180,7 @@ struct Config {
                                "com.cisco.webexmeetingsapp"],
             meetingCommand: "/opt/homebrew/bin/uv run --project " +
                             "/Users/jonathan.glasmeyer/Projects/meeting-transcript meeting",
-            recordOnly: false, language: "de", cooldown: 180,
+            recordOnly: false, whisperModel: "large-v3-turbo", cooldown: 180,
             requireMeetingApp: true,
             ignoreDeviceSubstrings: ["blackhole", "multi-output"])
         let url = dir.appendingPathComponent("config.json")
@@ -189,7 +189,7 @@ struct Config {
         if let v = j["meeting_bundle_ids"] as? [String] { c.meetingBundleIDs = v }
         if let v = j["meeting_command"] as? String { c.meetingCommand = v }
         if let v = j["record_only"] as? Bool { c.recordOnly = v }
-        if let v = j["language"] as? String { c.language = v.isEmpty ? nil : v }
+        if let v = j["whisper_model"] as? String { c.whisperModel = v.isEmpty ? nil : v }
         if let v = j["cooldown_seconds"] as? Double { c.cooldown = v }
         if let v = j["require_meeting_app"] as? Bool { c.requireMeetingApp = v }
         if let v = j["ignore_device_substrings"] as? [String] { c.ignoreDeviceSubstrings = v }
@@ -354,7 +354,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startRecording() {
         var cmd = cfg.meetingCommand
         if cfg.recordOnly { cmd += " -r" }
-        if let l = cfg.language { cmd += " -l \(l)" }
+        // Language is auto-detected by the transcriber (no -l). Model pinned via env.
+        if let m = cfg.whisperModel, !m.isEmpty { cmd = "WHISPER_MODEL=\(m) " + cmd }
         recorder.start(command: cmd)
         state = .recording
         recordingStart = Date()

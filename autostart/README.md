@@ -44,7 +44,7 @@ to grant microphone access to the recorder — approve once.
 | `meeting_bundle_ids` | apps whose presence + a live mic = a meeting |
 | `meeting_command` | command run to record (default: full transcribe pipeline) |
 | `record_only` | `true` → `meeting -r` (capture only, no transcription) |
-| `language` | passed as `-l` (e.g. `de`) |
+| `whisper_model` | Whisper model passed via `WHISPER_MODEL` (default `large-v3-turbo`; language is auto-detected) |
 | `cooldown_seconds` | min gap between prompts (suppresses re-prompt for same call) |
 | `require_meeting_app` | if `true`, never prompt on bare mic activity |
 | `ignore_device_substrings` | device-name substrings to never watch (loopbacks) |

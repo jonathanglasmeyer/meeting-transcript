@@ -1,5 +1,5 @@
 {
-  "_comment": "Policy for MeetingBar. Edited values are picked up on the next detection (no recompile).",
+  "_comment": "Policy for MeetingBar. Edited values are picked up on the next detection (no recompile). Transcription language is auto-detected; 'whisper_model' pins the Whisper model.",
 
   "meeting_bundle_ids": [
     "com.microsoft.teams2",
@@ -12,7 +12,7 @@
 
   "meeting_command": "/opt/homebrew/bin/uv run --project /Users/jonathan.glasmeyer/Projects/meeting-transcript meeting",
   "record_only": false,
-  "language": "de",
+  "whisper_model": "large-v3-turbo",
 
   "cooldown_seconds": 180,
   "require_meeting_app": true,
