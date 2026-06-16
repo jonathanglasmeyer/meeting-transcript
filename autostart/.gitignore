@@ -1,0 +1,4 @@
+# Compiled binaries (rebuilt by install.sh / swiftc)
+meetingbar
+micwatch
+*.dSYM/

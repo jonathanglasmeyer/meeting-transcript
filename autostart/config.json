@@ -1,0 +1,21 @@
+{
+  "_comment": "Policy for MeetingBar. Edited values are picked up on the next detection (no recompile).",
+
+  "meeting_bundle_ids": [
+    "com.microsoft.teams2",
+    "com.microsoft.teams",
+    "us.zoom.xos",
+    "com.tinyspeck.slackmacgap",
+    "com.cisco.webexmeetingsapp",
+    "com.webex.meetingmanager"
+  ],
+
+  "meeting_command": "/opt/homebrew/bin/uv run --project /Users/jonathan.glasmeyer/Projects/meeting-transcript meeting",
+  "record_only": false,
+  "language": "de",
+
+  "cooldown_seconds": 180,
+  "require_meeting_app": true,
+
+  "ignore_device_substrings": ["blackhole", "multi-output"]
+}
