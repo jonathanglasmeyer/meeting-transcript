@@ -272,7 +272,7 @@ def record_audio(output_path: Path, downsample: bool = True) -> Path:
             capture_output=True, check=True
         )
 
-    # Cleanup raw files (keep wav for debugging)
+    # Cleanup raw files
     for raw_file in [mic_raw, system_raw]:
         if raw_file.exists():
             raw_file.unlink()
@@ -281,6 +281,11 @@ def record_audio(output_path: Path, downsample: bool = True) -> Path:
     for backup_file in [mic_wav_backup, system_wav_backup]:
         if backup_file.exists():
             backup_file.unlink()
+
+    # Delete intermediate WAVs (only recording.wav needed for transcription)
+    for wav_file in [mic_wav, system_wav]:
+        if wav_file.exists():
+            wav_file.unlink()
 
     return output_path
 
@@ -302,7 +307,7 @@ MLX_WHISPER_MODELS = {
 }
 
 
-def transcribe_audio(audio_path: Path, model: str = "distil-large-v3", batch_size: int = 12, language: str = "en") -> dict:
+def transcribe_audio(audio_path: Path, model: str = "large-v3-turbo", batch_size: int = 12, language: str | None = None) -> dict:
     """Transcribe audio using mlx-whisper with word-level timestamps."""
     import mlx_whisper
 
@@ -521,7 +526,7 @@ def get_next_processed_path(meeting_dir: Path) -> Path:
 MIN_AUDIO_DURATION = 3.0  # seconds - minimum for meaningful transcription
 
 
-async def process_audio(audio_path: Path, meeting_dir: Path, language: str = "en") -> Path:
+async def process_audio(audio_path: Path, meeting_dir: Path, language: str | None = None) -> Path:
     """Full pipeline: transcribe, diarize, generate protocol."""
     import time
     import shutil
@@ -533,11 +538,10 @@ async def process_audio(audio_path: Path, meeting_dir: Path, language: str = "en
         shutil.rmtree(meeting_dir)
         return None
 
-    # distil-large-v3 is English-only, use large-v3 for other languages
-    default_model = "distil-large-v3" if language == "en" else "large-v3"
-    model = os.environ.get("WHISPER_MODEL", default_model)
+    # large-v3-turbo: multilingual, ~5x faster than large-v3, quality ~equivalent
+    model = os.environ.get("WHISPER_MODEL", "large-v3-turbo")
 
-    print(f"⏳ Processing {duration/60:.1f}min audio {DIM}({language}, {model}){RESET}")
+    print(f"⏳ Processing {duration/60:.1f}min audio {DIM}({language or 'auto'}, {model}){RESET}")
 
     # Run sequentially - Senko uses numba which conflicts with ThreadPoolExecutor
     t1 = time.time()
@@ -566,6 +570,10 @@ async def process_audio(audio_path: Path, meeting_dir: Path, language: str = "en
         f.write(processed)
     print(f" {DIM}({time.time()-t3:.1f}s){RESET}")
 
+    # Delete all audio files after successful transcription
+    for f in meeting_dir.glob("*.wav"):
+        f.unlink()
+
     total_time = time.time() - pipeline_start
     print(f"✅ {processed_path} {DIM}({total_time:.1f}s){RESET}")
 
@@ -592,8 +600,8 @@ def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Meeting transcription with speaker diarization")
     parser.add_argument("file", nargs="?", help="Audio/video file or raw.md to process")
-    parser.add_argument("-l", "--lang", "--language", dest="language", default="en",
-                       choices=["en", "de"], help="Transcription language (default: en)")
+    parser.add_argument("-l", "--lang", "--language", dest="language", default=None,
+                       help="Force language (e.g. de, en). Default: auto-detect")
     parser.add_argument("-r", "--record-only", action="store_true",
                        help="Record audio only, skip transcription")
     return parser.parse_args()
