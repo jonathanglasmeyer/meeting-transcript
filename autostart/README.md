@@ -24,8 +24,9 @@ MeetingBar (one AppKit app)
 - **Stop** writes `\n` to the recorder's stdin, releasing the `input()` that
   `meeting` blocks on ([../meeting_transcript/main.py](../meeting_transcript/main.py)) —
   the same stop path as manual use, minus the visible Terminal.
-- Only a **rising edge** triggers a prompt; an already-live mic at launch is
-  adopted silently (launching mid-call won't pop a dialog).
+- A rising edge (mic goes live) triggers a prompt; if a mic is already live at
+  launch — you started/restarted mid-call — it prompts once on startup too. A
+  **🎙 Jetzt aufnehmen** menu item starts a recording manually anytime.
 
 ## Install
 

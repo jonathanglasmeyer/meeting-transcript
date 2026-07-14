@@ -155,7 +155,10 @@ final class MicWatcher {
                 AudioObjectID(kAudioObjectSystemObject), &devAddr, self.q) { [weak self] _, _ in
                 self?.refreshWatched(); self?.recompute()
             }
-            self.emitted = self.anyRunning()   // adopt current state silently; only edges fire onChange
+            // If a mic is already live at launch (e.g. started mid-call), prompt once too.
+            let initial = self.anyRunning()
+            self.emitted = initial
+            if initial { DispatchQueue.main.async { self.onChange(true) } }
         }
     }
 }
@@ -372,6 +375,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         render()
     }
 
+    @objc private func recordNow() {   // manual start from the menu, bypasses detection
+        guard state == .idle else { return }
+        startRecording()
+    }
+
     private func recordingFinished(_ status: Int32) {
         elapsedTimer?.invalidate(); elapsedTimer = nil
         state = .idle
@@ -400,6 +408,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.title = ""
             button.contentTintColor = nil
             menu.addItem(NSMenuItem(title: "Bereit — wartet auf Meeting", action: nil, keyEquivalent: ""))
+            menu.addItem(.separator())
+            let recNow = NSMenuItem(title: "🎙 Jetzt aufnehmen", action: #selector(recordNow), keyEquivalent: "")
+            recNow.target = self
+            menu.addItem(recNow)
         case .recording:
             button.image = micIcon(filled: true)
             button.image?.isTemplate = false
