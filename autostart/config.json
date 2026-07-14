@@ -1,5 +1,5 @@
 {
-  "_comment": "Policy for MeetingBar. Edited values are picked up on the next detection (no recompile). Transcription language is auto-detected; 'whisper_model' pins the Whisper model.",
+  "_comment": "Policy for MeetingBar. Edited values are picked up on the next detection (no recompile). Transcription language is auto-detected; 'whisper_model' pins the Whisper model. 'meeting_command' defaults to running the CLI out of this checkout — only set it to override that.",
 
   "meeting_bundle_ids": [
     "com.microsoft.teams2",
@@ -10,7 +10,6 @@
     "com.webex.meetingmanager"
   ],
 
-  "meeting_command": "/opt/homebrew/bin/uv run --project /Users/jonathan.glasmeyer/Projects/meeting-transcript meeting",
   "record_only": false,
   "whisper_model": "large-v3-turbo",
 

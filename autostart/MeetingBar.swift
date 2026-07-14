@@ -177,12 +177,14 @@ struct Config {
     var ignoreDeviceSubstrings: [String]
 
     static func load(from dir: URL) -> Config {
+        // `dir` is autostart/, so its parent is the checkout — run the CLI out of it.
+        // Keeps the app working from any clone; override via config.json meeting_command.
+        let project = dir.deletingLastPathComponent().path
         var c = Config(
             meetingBundleIDs: ["com.microsoft.teams2", "com.microsoft.teams",
                                "us.zoom.xos", "com.tinyspeck.slackmacgap",
                                "com.cisco.webexmeetingsapp"],
-            meetingCommand: "/opt/homebrew/bin/uv run --project " +
-                            "/Users/jonathan.glasmeyer/Projects/meeting-transcript meeting",
+            meetingCommand: "/opt/homebrew/bin/uv run --project \(project) meeting",
             recordOnly: false, whisperModel: "large-v3-turbo", cooldown: 180,
             requireMeetingApp: true,
             ignoreDeviceSubstrings: ["blackhole", "multi-output"])

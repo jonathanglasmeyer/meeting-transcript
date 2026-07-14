@@ -43,7 +43,7 @@ to grant microphone access to the recorder — approve once.
 | key | meaning |
 |---|---|
 | `meeting_bundle_ids` | apps whose presence + a live mic = a meeting |
-| `meeting_command` | command run to record (default: full transcribe pipeline) |
+| `meeting_command` | *optional* — command run to record. Defaults to running the `meeting` CLI out of this checkout, so a fresh clone works as-is; set it only to point somewhere else. |
 | `record_only` | `true` → `meeting -r` (capture only, no transcription) |
 | `whisper_model` | Whisper model passed via `WHISPER_MODEL` (default `large-v3-turbo`; language is auto-detected) |
 | `cooldown_seconds` | min gap between prompts (suppresses re-prompt for same call) |
