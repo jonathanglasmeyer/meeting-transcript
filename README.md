@@ -55,6 +55,42 @@ See [CLAUDE.md](CLAUDE.md) for detailed setup.
 
 **Output:** `~/Meetings/<YYYY-MM-DD_HHMMSS>/raw.md` (raw) + `processed.md` (smoothed)
 
+## Auto-start (menu bar)
+
+Don't want to remember to hit `meeting` before every call? [`autostart/`](autostart/) ships
+**MeetingBar** — a native menu-bar app that notices when you join a Teams/Zoom/Slack call and
+offers to start the recorder. A 🎙 in the menu bar means it's recording; click to stop, and
+transcription kicks off automatically. No Terminal involved.
+
+```bash
+cd autostart && ./install.sh
+```
+
+Detection reads only Core Audio device state, so **no microphone permission is needed just to
+detect** a call. Which apps count as a meeting, which Whisper model to use, and the re-prompt
+cooldown are all configurable in [`autostart/config.json`](autostart/config.json) without a
+recompile.
+
+See [autostart/README.md](autostart/README.md) for how it works, the full config table, and
+troubleshooting.
+
+## Recommended: the `/meeting-notes` Claude Code skill
+
+The CLI gets you an accurate transcript — but it's still a transcript: Whisper artifacts,
+`SPEAKER_01` labels, no structure. [`skills/meeting-notes/`](skills/meeting-notes/) is a
+[Claude Code](https://claude.com/claude-code) skill that turns it into something you'd actually
+file: it picks up the newest meeting, strips the hallucinated filler, maps speakers to real
+names, keeps only what's relevant to the project you're in, and writes a note with TL;DR,
+decisions, action items and open questions into the project's `meetings/` folder. It then reads
+the tickets the meeting touched and proposes — in chat, without writing anything — what the
+meeting implies for them.
+
+```bash
+cp -r skills/meeting-notes ~/.claude/skills/
+```
+
+Then say *"process the last meeting"* (or `/meeting-notes`) in a project.
+
 ## Architecture
 
 - **Recording** — sox captures system audio (BlackHole) + microphone, mixed to 16kHz mono
